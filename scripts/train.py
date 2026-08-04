@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 from pathlib import Path
+import json
 
 import yaml
 
@@ -18,10 +19,10 @@ if not cfg_path.is_file():
 cfg = yaml.safe_load(cfg_path.read_text())
 run, log_conf, config = cfg["run"], cfg["logging"], cfg["config"]
 
-for _l in (ROOT / ".env").read_text().splitlines():
-    if "=" in _l and not _l.lstrip().startswith("#"):
-        _k, _v = _l.split("=", 1)
-        os.environ.setdefault(_k.strip(), _v.strip().strip('"\''))
+# for _l in (ROOT / ".env").read_text().splitlines():
+#     if "=" in _l and not _l.lstrip().startswith("#"):
+#         _k, _v = _l.split("=", 1)
+#         os.environ.setdefault(_k.strip(), _v.strip().strip('"\''))
 
 if log_conf["comet"]:
     import comet_ml  # noqa: F401  must precede torch/lightning for auto-logging
@@ -30,6 +31,8 @@ import lightning as ltng
 import torch
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
+
+from lightning.pytorch.loggers import CometLogger, WandbLogger
 
 d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
@@ -55,23 +58,23 @@ if scheduler is not None and "total_steps" not in scheduler:
     scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices)))
 
 if log_conf["comet"]:
-    from lightning.pytorch.loggers import CometLogger
-
     logger = CometLogger(
         api_key=os.environ["COMET_API_KEY"],
         project=log_conf["project"],
         workspace=os.environ.get("COMET_WORKSPACE"),
         mode="get_or_create",
         name=name,
+        offline=True
     )
+
 else:
-    logger = False
+    logger = WandbLogger(project="lego")
 
 config["additional"]["epochs"] = epochs
 config["additional"]["precision"] = (
     str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
 )
-config["additional"]["comet_exp_key"] = logger._experiment_key if logger else None
+config["additional"]["comet_exp_key"] = logger._experiment_key if isinstance(logger, CometLogger) else None
 try:
     git_rev = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
@@ -80,7 +83,7 @@ except (subprocess.CalledProcessError, FileNotFoundError):
     git_rev = None
 config["additional"]["git_rev"] = git_rev
 
-if logger:
+if isinstance(logger, CometLogger):
     logger.log_hyperparams(config)
     logger.experiment.log_asset(str(cfg_path), file_name=cfg_path.name)
 
@@ -116,6 +119,7 @@ if train_model == "fm" and compile_mode == "model":
 trainer.fit(
     model=model
 )
+
 
 model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
