@@ -51,7 +51,7 @@ class GenerateOut(torch.nn.Module):
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, gt_mult = None):
         cond_model = cond.clone()
         if not prepped:
             nc = self.n_cond
@@ -63,18 +63,24 @@ class GenerateOut(torch.nn.Module):
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
-        batch = self.gen_batch(cond_model)
+        batch = self.gen_batch(cond_model, gt_mult=gt_mult)
         sols, mask, attn_mask = self.model(batch)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, gt_mult=None):
         device = next(self.model.parameters()).device
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
         )
+
+        if gt_mult is not None:
+            assert gt_mult.shape == (n, self.ptypes.shape[0])
+            gt_mult = gt_mult.to(device)
+        
         Z = Z.to(device) if Z is not None else None
         A = A.to(device) if A is not None else None
+       
 
         scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
         missing = [k for k in self.cond_names if scalar_src.get(k) is None]
@@ -82,6 +88,7 @@ class GenerateOut(torch.nn.Module):
             raise ValueError(f"gen_model_w_g4_args missing conditioning arrays for {missing}")
         if "Size" not in self.cond_names and size.shape[0] != 1:
             raise ValueError("Multiple sizes not yet supported (size is not a conditioning variable).")
+    
 
         shapes = {
             "pos": pos.view(-1, 3).shape[0],
@@ -91,6 +98,9 @@ class GenerateOut(torch.nn.Module):
             **{k: scalar_src[k].reshape(-1).shape[0] for k in self.cond_names},
         }
         B = max(shapes.values())
+        if gt_mult is not None:
+            assert B ==1
+        
         err_size = {k: v for k, v in shapes.items() if v not in (1, B)}
         if err_size:
             raise ValueError(
@@ -111,7 +121,7 @@ class GenerateOut(torch.nn.Module):
         pdgids_b = _scalar_col(pdgids).to(cc.dtype)
         cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
-        sols, _, _ = self(cond)
+        sols, _, _ = self(cond, gt_mult=gt_mult)
         s = _F(sols)
         per_event = {"E_dep": s.edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -121,13 +131,18 @@ class GenerateOut(torch.nn.Module):
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
 
-    def gen_batch(self, cond: torch.Tensor):
+    def gen_batch(self, cond, gt_mult: torch.Tensor | None = None):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
         mult_in = torch.cat(
             (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
         )
-        mult = self.gen_mult((mult_in, None, pdgid_in_idx))
+
+        if gt_mult is not None:
+            assert gt_mult.shape == (cond.shape[0], self.ptypes.shape[0])
+            mult = gt_mult.long()
+        else:
+            mult = self.gen_mult((mult_in, None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)
