@@ -74,13 +74,10 @@ class GenerateOut(torch.nn.Module):
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
         )
 
-        if gt_mult is not None:
-            assert gt_mult.shape == (n, self.ptypes.shape[0])
-            gt_mult = gt_mult.to(device)
-        
+        gt_mult = gt_mult.to(device) if gt_mult is not None else None
+
         Z = Z.to(device) if Z is not None else None
         A = A.to(device) if A is not None else None
-       
 
         scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
         missing = [k for k in self.cond_names if scalar_src.get(k) is None]
@@ -88,7 +85,6 @@ class GenerateOut(torch.nn.Module):
             raise ValueError(f"gen_model_w_g4_args missing conditioning arrays for {missing}")
         if "Size" not in self.cond_names and size.shape[0] != 1:
             raise ValueError("Multiple sizes not yet supported (size is not a conditioning variable).")
-    
 
         shapes = {
             "pos": pos.view(-1, 3).shape[0],
@@ -98,14 +94,22 @@ class GenerateOut(torch.nn.Module):
             **{k: scalar_src[k].reshape(-1).shape[0] for k in self.cond_names},
         }
         B = max(shapes.values())
-        if gt_mult is not None:
-            assert B ==1
-        
+
         err_size = {k: v for k, v in shapes.items() if v not in (1, B)}
         if err_size:
             raise ValueError(
                 f"Each argument must have either size 1 or batch size {B}; got {err_size}"
             )
+
+        if gt_mult is not None:
+            # gt_mult has one row per generated event, in the same flattened
+            # order gen_batch will build `cond` in: B*n rows, blocked B
+            # conditions of n consecutive events each (see _scalar_col below).
+            # Only B==1 or n==1 is reachable from lego-eval's callers today
+            # (make_simulate_for_model's own _check_simulate_shapes forbids
+            # B>1 and n>1 together), so there is no per-condition-block
+            # ordering ambiguity to guard against here.
+            assert gt_mult.shape == (B * n, self.ptypes.shape[0])
 
         mom = F.normalize(mom, dim=-1)
 
